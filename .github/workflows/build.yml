@@ -1,15 +1,3 @@
-# =============================================================================
-# build.yml — GitHub Actions CI/CD para OBS AI Background Blur
-#
-# Compila el plugin automáticamente en la nube (GitHub Actions).
-# No necesitas Visual Studio ni CMake instalados localmente.
-#
-# ¿Cómo obtener el .dll compilado?
-#   1. Sube este código a un repositorio en GitHub
-#   2. Ve a Actions → Build → Run workflow
-#   3. Descarga el artifact "obs-ai-background-blur-windows.zip"
-# =============================================================================
-
 name: Build
 
 on:
@@ -18,7 +6,7 @@ on:
     tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch:      # Permite build manual desde la UI de GitHub
+  workflow_dispatch:
 
 jobs:
   build-windows:
@@ -29,130 +17,71 @@ jobs:
         config: [RelWithDebInfo]
 
     steps:
-      # 1. Checkout del código fuente
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Cache de ONNX Runtime (para no descargar en cada build)
       - name: Cache ONNX Runtime
         id: cache-onnx
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: C:\onnxruntime
           key: onnxruntime-1.15-${{ runner.arch }}
 
-      # 3. Descargar ONNX Runtime (si no está en caché)
       - name: Download ONNX Runtime
         if: steps.cache-onnx.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.15.1/onnxruntime-win-x64-1.15.1.zip"
           $zip = "$env:TEMP\onnxruntime.zip"
-          Write-Host "Descargando ONNX Runtime desde $url..."
+          Write-Host "Downloading ONNX Runtime..."
           Invoke-WebRequest -Uri $url -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath C:\onnxruntime -Force
-          Write-Host "ONNX Runtime descargado y extraído"
+          Write-Host "Done"
 
-      # 4. Instalar dependencias con vcpkg (solo lo mínimo)
-      - name: Install dependencies (vcpkg)
-        shell: pwsh
-        run: |
-          # vcpkg viene preinstalado en windows-2022
-          # Solo verificamos que está disponible
-          vcpkg --version
-
-      # 5. Configurar con CMake
       - name: Configure CMake
         shell: cmd
         run: |
-          cmake -B build ^
-                -S . ^
-                -G "Visual Studio 17 2022" ^
-                -A ${{ matrix.arch }} ^
-                -DONNX_RUNTIME_DIR="C:\onnxruntime\onnxruntime-win-x64-1.15.1" ^
-                -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          cmake -B build -S . -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DONNX_RUNTIME_DIR="C:\onnxruntime\onnxruntime-win-x64-1.15.1"
 
-      # 6. Compilar
       - name: Build
         shell: cmd
         run: |
           cmake --build build --config ${{ matrix.config }} --parallel
 
-      # 7. Descargar modelo MediaPipe ONNX para incluirlo en el artifact
       - name: Download MediaPipe model
         shell: pwsh
         run: |
-          $modelUrl = "https://storage.googleapis.com/mediapipe-models/selfie_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.onnx"
-          $modelDir = "build\${{ matrix.config }}\models"
-          New-Item -ItemType Directory -Force -Path $modelDir
-          Invoke-WebRequest -Uri $modelUrl -OutFile "$modelDir\selfie_segmentation.onnx"
-          Write-Host "Modelo MediaPipe descargado"
+          $url = "https://storage.googleapis.com/mediapipe-models/selfie_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.onnx"
+          $dir = "build\${{ matrix.config }}\models"
+          New-Item -ItemType Directory -Force -Path $dir
+          Invoke-WebRequest -Uri $url -OutFile "$dir\selfie_segmentation.onnx"
 
-      # 8. Empaquetar artifact (plugin + shaders + modelo)
-      - name: Package artifact
+      - name: Package
         shell: pwsh
         run: |
           $srcDir = "build\${{ matrix.config }}"
           $outDir = "obs-ai-background-blur-artifact"
-
           New-Item -ItemType Directory -Force -Path $outDir
-
-          # Plugin .dll
           Copy-Item "$srcDir\obs-ai-background-blur.dll" -Destination "$outDir\" -ErrorAction SilentlyContinue
-
-          # Shaders
           Copy-Item -Recurse "shaders" -Destination "$outDir\shaders" -ErrorAction SilentlyContinue
-
-          # Modelos
           Copy-Item -Recurse "$srcDir\models" -Destination "$outDir\models" -ErrorAction SilentlyContinue
-
-          # Recursos
           Copy-Item -Recurse "resources" -Destination "$outDir\resources" -ErrorAction SilentlyContinue
-
-          # README corto de instalación
-          @"
-          # OBS AI Background Blur - Build ${{ github.run_number }}
-
-          ## Instalación
-          1. Copia `obs-ai-background-blur.dll` en:
-             `C:\Program Files\obs-studio\obs-plugins\64bit\`
-          2. Copia las carpetas `shaders/`, `models/` y `resources/`
-             en la misma carpeta que el .dll
-          3. Abre OBS Studio y agrega el filtro "AI Background Blur"
-
-          Build: ${{ github.run_number }}
-          Commit: ${{ github.sha }}
-          Fecha: ${{ github.run_date }}
-          "@ > "$outDir\README_BUILD.txt"
-
-          # Comprimir
+          "Build ${{ github.run_number }} | Commit ${{ github.sha }}" | Out-File -FilePath "$outDir\version.txt" -Encoding utf8
           Compress-Archive -Path "$outDir\*" -DestinationPath "obs-ai-background-blur-windows.zip"
 
-      # 9. Subir artifact (disponible para descargar desde GitHub)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-ai-background-blur-${{ matrix.arch }}-${{ matrix.config }}
           path: obs-ai-background-blur-windows.zip
-          compression-level: 0  # ya está comprimido
+          compression-level: 0
 
-      # 10. Crear Release si es un tag
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: obs-ai-background-blur-windows.zip
           body: |
             ## OBS AI Background Blur ${{ github.ref_name }}
 
-            ### Archivos incluidos:
-            - `obs-ai-background-blur.dll` — Plugin compilado
-            - `shaders/` — Shaders GPU (.effect)
-            - `models/` — Modelo MediaPipe Selfie Segmentation
-            - `resources/` — Archivos de traducción
-
-            ### Instalación:
-            1. Copiar todo a `C:\Program Files\obs-studio\obs-plugins\64bit\`
-            2. Abrir OBS → agregar filtro "AI Background Blur"
-          draft: false
-          prerelease: false
+            Contiene: plugin .dll, shaders, modelos ONNX y recursos.
