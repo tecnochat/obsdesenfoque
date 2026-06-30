@@ -1,0 +1,87 @@
+// =============================================================================
+// composite.effect — Composición final: foreground nítido + fondo blur
+//
+// Toma el frame original, el frame difuminado y la máscara de segmentación,
+// y los combina para producir el resultado final.
+//
+// La máscara determina qué píxeles pertenecen a la persona (foreground)
+// y cuáles al fondo (background). El foreground se mantiene nítido,
+// el background se muestra con blur.
+// =============================================================================
+
+uniform float4x4 ViewProj;
+
+uniform texture2d original_frame;   // Frame original (sin procesar)
+uniform texture2d blurred_frame;    // Frame con blur gaussiano aplicado
+uniform texture2d mask_texture;     // Máscara refinada (1 canal, R)
+
+uniform float edge_softness;        // 0.0 - 1.0, suavizado de transición
+uniform float blur_strength_factor; // 0.0 - 1.0, intensidad del blur (no usado aquí)
+uniform bool show_mask;             // Debug: muestra la máscara en lugar del composite
+
+// ── Samplers ───────────────────────────────────────────────────────────────
+
+sampler_state linear_sampler {
+    Filter    = Linear;
+    AddressU  = Clamp;
+    AddressV  = Clamp;
+    AddressW  = Clamp;
+};
+
+// ── Vertex Shader ──────────────────────────────────────────────────────────
+
+struct VertData {
+    float4 pos  : POSITION;
+    float2 uv   : TEXCOORD0;
+};
+
+struct PixelData {
+    float4 pos  : SV_POSITION;
+    float2 uv   : TEXCOORD0;
+};
+
+PixelData VSMain(VertData vert) {
+    PixelData out_data;
+    out_data.pos = mul(float4(vert.pos.xyz, 1.0), ViewProj);
+    out_data.uv  = vert.uv;
+    return out_data;
+}
+
+// ── Pixel Shader: Composición Final ────────────────────────────────────────
+
+float4 PSComposite(PixelData input) : SV_TARGET {
+    float4 original = original_frame.Sample(linear_sampler, input.uv);
+    float4 blurred  = blurred_frame.Sample(linear_sampler, input.uv);
+
+    // Leer la máscara (viene en canal R)
+    float mask = mask_texture.Sample(linear_sampler, input.uv).r;
+
+    // Aplicar feathering en la transición
+    // edge_softness controla qué tan gradual es la mezcla en los bordes
+    float alpha = mask;
+    if (edge_softness > 0.0) {
+        // Expande el rango de transición: a mayor edge_softness,
+        // más suave es la transición foreground/background
+        float d = edge_softness * 0.2;
+        alpha = smoothstep(0.0 - d, 1.0 + d, mask);
+    }
+
+    // Mostrar máscara en modo debug
+    if (show_mask) {
+        return float4(mask, mask, mask, 1.0);
+    }
+
+    // Composición: foreground nítido + fondo con blur
+    float4 result = lerp(blurred, original, alpha);
+
+    return result;
+}
+
+// ── Técnicas ───────────────────────────────────────────────────────────────
+
+technique Draw {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSComposite(input);
+    }
+}

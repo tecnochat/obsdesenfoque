@@ -1,0 +1,27 @@
+# OBS AI Background Blur — .gitignore
+
+# Compilación
+build/
+cmake-build-*/
+*.obj
+*.lib
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.exe
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# ONNX models (grandes, descargar por separado)
+models/*.onnx
+
+# OS
+.DS_Store
+Thumbs.db

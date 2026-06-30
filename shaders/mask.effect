@@ -1,0 +1,174 @@
+// =============================================================================
+// mask.effect — Refinamiento de máscara de segmentación
+//
+// Procesa la máscara en bruto generada por el modelo de IA:
+//   1. Thresholding (binarización suave)
+//   2. Refinamiento de bordes (suavizado + feathering)
+//   3. Post-process opcional para bordes de alta calidad
+// =============================================================================
+
+uniform float4x4 ViewProj;
+
+uniform texture2d raw_mask;         // Máscara de entrada (1 canal, float)
+uniform texture2d source_frame;     // Frame original (para edge-aware refinement)
+
+uniform float mask_threshold;       // 0.0 - 1.0, umbral de binarización
+uniform float edge_softness;        // 0.0 - 1.0, suavizado de bordes
+uniform float2 texel_size;          // 1/width, 1/height
+
+uniform bool  high_quality_edges;   // true = edge-aware refinement
+
+// ── Samplers ───────────────────────────────────────────────────────────────
+
+sampler_state point_sampler {
+    Filter    = Point;
+    AddressU  = Clamp;
+    AddressV  = Clamp;
+    AddressW  = Clamp;
+};
+
+sampler_state linear_sampler {
+    Filter    = Linear;
+    AddressU  = Clamp;
+    AddressV  = Clamp;
+    AddressW  = Clamp;
+};
+
+// ── Vertex Shader ──────────────────────────────────────────────────────────
+
+struct VertData {
+    float4 pos  : POSITION;
+    float2 uv   : TEXCOORD0;
+};
+
+struct PixelData {
+    float4 pos  : SV_POSITION;
+    float2 uv   : TEXCOORD0;
+};
+
+PixelData VSMain(VertData vert) {
+    PixelData out_data;
+    out_data.pos = mul(float4(vert.pos.xyz, 1.0), ViewProj);
+    out_data.uv  = vert.uv;
+    return out_data;
+}
+
+// ── Detección de bordes (Sobel simplificado) ───────────────────────────────
+
+float EdgeDetect(float2 uv) {
+    float tl = raw_mask.Sample(point_sampler, uv + float2(-texel_size.x, -texel_size.y)).r;
+    float t  = raw_mask.Sample(point_sampler, uv + float2(0.0, -texel_size.y)).r;
+    float tr = raw_mask.Sample(point_sampler, uv + float2(texel_size.x, -texel_size.y)).r;
+    float l  = raw_mask.Sample(point_sampler, uv + float2(-texel_size.x, 0.0)).r;
+    float r  = raw_mask.Sample(point_sampler, uv + float2(texel_size.x, 0.0)).r;
+    float bl = raw_mask.Sample(point_sampler, uv + float2(-texel_size.x, texel_size.y)).r;
+    float b  = raw_mask.Sample(point_sampler, uv + float2(0.0, texel_size.y)).r;
+    float br = raw_mask.Sample(point_sampler, uv + float2(texel_size.x, texel_size.y)).r;
+
+    float gx = -tl - 2.0 * l - bl + tr + 2.0 * r + br;
+    float gy = -tl - 2.0 * t - tr + bl + 2.0 * b + br;
+
+    return sqrt(gx * gx + gy * gy);
+}
+
+// ── Smooth step con control de suavidad ─────────────────────────────────────
+
+float SmoothThreshold(float value, float threshold, float softness) {
+    float width = max(softness * 0.5, 0.001);
+    return smoothstep(threshold - width, threshold + width, value);
+}
+
+// ── Refinamiento edge-aware (bordes de alta calidad) ────────────────────────
+// Usa el frame original para detectar bordes reales y alinear la máscara.
+
+float EdgeAwareRefine(float2 uv, float raw_mask_value) {
+    // Muestra la luminancia alrededor del pixel
+    float3 c  = source_frame.Sample(linear_sampler, uv).rgb;
+    float lum = dot(c, float3(0.299, 0.587, 0.114));
+
+    float3 cl = source_frame.Sample(linear_sampler, uv + float2(-texel_size.x, 0.0)).rgb;
+    float3 cr = source_frame.Sample(linear_sampler, uv + float2(texel_size.x, 0.0)).rgb;
+    float3 cu = source_frame.Sample(linear_sampler, uv + float2(0.0, -texel_size.y)).rgb;
+    float3 cd = source_frame.Sample(linear_sampler, uv + float2(0.0, texel_size.y)).rgb;
+
+    float lum_l = dot(cl, float3(0.299, 0.587, 0.114));
+    float lum_r = dot(cr, float3(0.299, 0.587, 0.114));
+    float lum_u = dot(cu, float3(0.299, 0.587, 0.114));
+    float lum_d = dot(cd, float3(0.299, 0.587, 0.114));
+
+    // Diferencia de luminancia entre vecinos (bordes de la imagen real)
+    float edge_x = abs(lum_l - lum_r);
+    float edge_y = abs(lum_u - lum_d);
+    float image_edge = max(edge_x, edge_y);
+
+    // La máscara se adhiere a bordes reales de la imagen
+    float edge_factor = smoothstep(0.05, 0.3, image_edge);
+    return lerp(raw_mask_value, raw_mask_value > 0.5 ? 1.0 : 0.0, edge_factor * 0.5);
+}
+
+// ── Pixel Shader: Refinamiento de Máscara ──────────────────────────────────
+
+float4 PSMaskRefine(PixelData input) : SV_TARGET {
+    float raw = raw_mask.Sample(point_sampler, input.uv).r;
+
+    // Paso 1: threshold suave
+    float mask = SmoothThreshold(raw, mask_threshold, edge_softness);
+
+    // Paso 2: refinamiento de bordes
+    float edge = EdgeDetect(input.uv);
+    if (edge > 0.01) {
+        // En bordes de la máscara, aplicamos feathering
+        float feather = edge_softness * 0.5;
+        mask = lerp(mask, raw, feather);
+    }
+
+    // Paso 3: edge-aware si está activado
+    if (high_quality_edges) {
+        mask = EdgeAwareRefine(input.uv, mask);
+    }
+
+    return float4(mask, mask, mask, 1.0);
+}
+
+// ── Pixel Shader: Dilatación suave ─────────────────────────────────────────
+// Expande ligeramente la máscara para evitar halos en el compositing.
+
+float4 PSMaskDilate(PixelData input) : SV_TARGET {
+    float max_val = 0.0;
+    int radius = 2;  // dilatación pequeña
+
+    [unroll]
+    for (int y = -radius; y <= radius; y++) {
+        [unroll]
+        for (int x = -radius; x <= radius; x++) {
+            float2 offset = float2((float)x * texel_size.x, (float)y * texel_size.y);
+            float v = raw_mask.Sample(point_sampler, input.uv + offset).r;
+            max_val = max(max_val, v);
+        }
+    }
+
+    return float4(max_val, max_val, max_val, 1.0);
+}
+
+// ── Técnicas ───────────────────────────────────────────────────────────────
+
+technique Refine {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSMaskRefine(input);
+    }
+}
+
+technique Dilate {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSMaskDilate(input);
+    }
+}
+
+technique Draw {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSMaskRefine(input);
+    }
+}

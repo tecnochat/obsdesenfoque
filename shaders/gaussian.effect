@@ -1,0 +1,115 @@
+// =============================================================================
+// gaussian.effect — Filtro de desenfoque Gaussiano (2 pases: H + V)
+//
+// Implementa un blur gaussiano separable en dos pases para máxima eficiencia.
+// Primer pase: blur horizontal. Segundo pase: blur vertical.
+// La intensidad se controla con blur_strength y blur_radius.
+// =============================================================================
+
+uniform float4x4 ViewProj;
+
+uniform texture2d input_texture;
+
+uniform float blur_radius;      // 1.0 - 50.0, controla el radio del kernel
+uniform float blur_strength;    // 0.0 - 1.0, controla la intensidad
+uniform float2 texel_size;      // 1/width, 1/height del input
+
+// ── Sampler ────────────────────────────────────────────────────────────────
+
+sampler_state linear_sampler {
+    Filter    = Linear;
+    AddressU  = Clamp;
+    AddressV  = Clamp;
+    AddressW  = Clamp;
+};
+
+// ── Vertex Shader (estándar OBS) ───────────────────────────────────────────
+
+struct VertData {
+    float4 pos  : POSITION;
+    float2 uv   : TEXCOORD0;
+};
+
+struct PixelData {
+    float4 pos  : SV_POSITION;
+    float2 uv   : TEXCOORD0;
+};
+
+PixelData VSMain(VertData vert) {
+    PixelData out_data;
+    out_data.pos = mul(float4(vert.pos.xyz, 1.0), ViewProj);
+    out_data.uv  = vert.uv;
+    return out_data;
+}
+
+// ── Pesos de Gauss (precalculados hasta radio 50) ──────────────────────────
+// Usamos distribución normal con sigma = radius / 3 para que el 99.7%
+// de la energía esté dentro del kernel.
+// Los pesos se generan en el shader mediante la función GaussWeight.
+
+float GaussWeight(float x, float sigma) {
+    return exp(-(x * x) / (2.0 * sigma * sigma));
+}
+
+// ── Pixel Shader: Pase Horizontal ──────────────────────────────────────────
+
+float4 PSHorizontal(PixelData input) : SV_TARGET {
+    float4 color = 0;
+    float total_weight = 0.0;
+
+    float sigma = max(blur_radius * blur_strength / 3.0, 0.5);
+    int radius = clamp((int)blur_radius, 1, 50);
+
+    [unroll]
+    for (int x = -radius; x <= radius; x++) {
+        float weight = GaussWeight((float)x, sigma);
+        float2 offset = float2((float)x * texel_size.x, 0.0);
+        color += input_texture.Sample(linear_sampler, input.uv + offset) * weight;
+        total_weight += weight;
+    }
+
+    return color / total_weight;
+}
+
+// ── Pixel Shader: Pase Vertical ────────────────────────────────────────────
+
+float4 PSVertical(PixelData input) : SV_TARGET {
+    float4 color = 0;
+    float total_weight = 0.0;
+
+    float sigma = max(blur_radius * blur_strength / 3.0, 0.5);
+    int radius = clamp((int)blur_radius, 1, 50);
+
+    [unroll]
+    for (int y = -radius; y <= radius; y++) {
+        float weight = GaussWeight((float)y, sigma);
+        float2 offset = float2(0.0, (float)y * texel_size.y);
+        color += input_texture.Sample(linear_sampler, input.uv + offset) * weight;
+        total_weight += weight;
+    }
+
+    return color / total_weight;
+}
+
+// ── Técnicas ───────────────────────────────────────────────────────────────
+
+technique Horizontal {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSHorizontal(input);
+    }
+}
+
+technique Vertical {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSVertical(input);
+    }
+}
+
+technique Draw {
+    pass {
+        vertex_shader = VSMain(vert);
+        pixel_shader  = PSHorizontal(input);
+    }
+}
